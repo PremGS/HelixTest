@@ -1,0 +1,16 @@
+# SLLIP TS-002 Test Dependencies
+# Install with: pip install -r tests/requirements-test.txt
+
+# Core test framework
+pytest>=7.4.0
+pytest-asyncio>=0.23.0
+
+# Async HTTP client (replaces requests/selenium for API tests)
+httpx>=0.27.0
+
+# FastAPI + uvicorn for mock gateway in CI
+fastapi>=0.111.0
+uvicorn>=0.29.0
+
+# Type hints and utilities
+typing-extensions>=4.9.0

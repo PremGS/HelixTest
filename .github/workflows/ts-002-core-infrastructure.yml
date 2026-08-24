@@ -1,0 +1,203 @@
+name: TS-002 Core Infrastructure & API Gateway Tests
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'infra/**'
+      - 'tests/test_core_infrastructure_api_gateway.py'
+      - '.github/workflows/ts-002-core-infrastructure.yml'
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'infra/**'
+      - 'tests/test_core_infrastructure_api_gateway.py'
+  workflow_dispatch:
+    inputs:
+      run_azure_live_tests:
+        description: 'Run live Azure provisioning tests (requires Azure credentials)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+env:
+  PYTHON_VERSION: '3.11'
+  CI_SKIP_AZURE_DEPLOY: ${{ github.event.inputs.run_azure_live_tests == 'true' && 'false' || 'true' }}
+  API_GATEWAY_BASE_URL: ${{ vars.API_GATEWAY_BASE_URL || 'http://localhost:8000' }}
+  BICEP_TEMPLATE_PATH: 'infra/main.bicep'
+  INFRA_DIR: 'infra'
+  COSMOS_DB_ACCOUNT_NAME: ${{ vars.COSMOS_DB_ACCOUNT_NAME || 'sllip-cosmos-dev' }}
+  COSMOS_DB_RESOURCE_GROUP: ${{ vars.COSMOS_DB_RESOURCE_GROUP || 'sllip-rg-dev' }}
+  COSMOS_DB_DATABASE_NAME: ${{ vars.COSMOS_DB_DATABASE_NAME || 'sllip-db' }}
+  STORAGE_ACCOUNT_NAME: ${{ vars.STORAGE_ACCOUNT_NAME || 'sllipstoragedev' }}
+  STORAGE_RESOURCE_GROUP: ${{ vars.STORAGE_RESOURCE_GROUP || 'sllip-rg-dev' }}
+
+jobs:
+  # -----------------------------------------------------------------------
+  # Job 1: Static / Offline Tests (always runs — no Azure credentials needed)
+  # -----------------------------------------------------------------------
+  static-infra-tests:
+    name: Static IaC & API Structure Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest pytest-asyncio httpx
+
+      - name: Install Azure CLI (for az bicep build)
+        run: |
+          curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+          az bicep install
+        continue-on-error: true
+
+      - name: Start mock API Gateway (for routing tests)
+        run: |
+          pip install fastapi uvicorn
+          cat > /tmp/mock_gateway.py << 'PYEOF'
+          import asyncio
+          from fastapi import FastAPI, Request, Response
+          from fastapi.responses import JSONResponse
+          import uvicorn
+
+          app = FastAPI()
+
+          @app.get("/v1/health")
+          async def v1_health():
+              return JSONResponse(
+                  content={"status": "ok", "version": "v1"},
+                  headers={"X-API-Version": "v1", "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"}
+              )
+
+          @app.get("/v2/health")
+          async def v2_health():
+              return JSONResponse(
+                  content={"status": "ok", "version": "v2"},
+                  headers={"X-API-Version": "v2", "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"}
+              )
+
+          @app.get("/v1/claims")
+          async def v1_claims():
+              return JSONResponse(content={"documentId": "test", "claims": [], "status": "processed"})
+
+          @app.get("/v1/documents")
+          async def v1_documents():
+              return JSONResponse(content={"documents": []})
+
+          @app.get("/")
+          async def root():
+              return JSONResponse(content={"service": "sllip-api-gateway"})
+
+          if __name__ == "__main__":
+              uvicorn.run(app, host="0.0.0.0", port=8000)
+          PYEOF
+          python /tmp/mock_gateway.py &
+          sleep 3
+          echo "Mock gateway started"
+        env:
+          API_GATEWAY_BASE_URL: http://localhost:8000
+
+      - name: Run TS-002 static and API routing tests
+        run: |
+          pytest tests/test_core_infrastructure_api_gateway.py \
+            -v \
+            --tb=short \
+            --asyncio-mode=auto \
+            -k "not skipif" \
+            --junit-xml=test-results/ts-002-static.xml
+        env:
+          CI_SKIP_AZURE_DEPLOY: 'true'
+          API_GATEWAY_BASE_URL: 'http://localhost:8000'
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ts-002-static-test-results
+          path: test-results/ts-002-static.xml
+          retention-days: 30
+
+      - name: Publish test report
+        uses: dorny/test-reporter@v1
+        if: always()
+        with:
+          name: TS-002 Static Tests
+          path: test-results/ts-002-static.xml
+          reporter: java-junit
+          fail-on-error: true
+
+  # -----------------------------------------------------------------------
+  # Job 2: Live Azure Tests (only on workflow_dispatch with live flag)
+  # -----------------------------------------------------------------------
+  live-azure-infra-tests:
+    name: Live Azure Provisioning Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    if: ${{ github.event.inputs.run_azure_live_tests == 'true' }}
+    environment: azure-dev
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest pytest-asyncio httpx
+
+      - name: Install Azure CLI
+        run: |
+          curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+          az bicep install
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Run TS-002 live Azure tests
+        run: |
+          pytest tests/test_core_infrastructure_api_gateway.py \
+            -v \
+            --tb=long \
+            --asyncio-mode=auto \
+            --junit-xml=test-results/ts-002-live.xml
+        env:
+          CI_SKIP_AZURE_DEPLOY: 'false'
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          COSMOS_DB_ACCOUNT_NAME: ${{ secrets.COSMOS_DB_ACCOUNT_NAME }}
+          COSMOS_DB_RESOURCE_GROUP: ${{ secrets.COSMOS_DB_RESOURCE_GROUP }}
+          COSMOS_DB_DATABASE_NAME: ${{ secrets.COSMOS_DB_DATABASE_NAME }}
+          STORAGE_ACCOUNT_NAME: ${{ secrets.STORAGE_ACCOUNT_NAME }}
+          AZURE_STORAGE_CONNECTION_STRING: ${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
+          API_GATEWAY_BASE_URL: ${{ secrets.API_GATEWAY_BASE_URL }}
+          TEST_API_TOKEN: ${{ secrets.TEST_API_TOKEN }}
+          TEST_DOCUMENT_ID: ${{ vars.TEST_DOCUMENT_ID }}
+
+      - name: Upload live test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ts-002-live-test-results
+          path: test-results/ts-002-live.xml
+          retention-days: 30
