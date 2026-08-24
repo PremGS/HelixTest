@@ -1,0 +1,195 @@
+name: TS-003 Document Upload & Format Validation
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'backend/**'
+      - 'frontend/**'
+      - 'tests/**'
+      - '.github/workflows/ts-003-document-upload-tests.yml'
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+
+env:
+  PYTHON_VERSION: '3.11'
+  NODE_VERSION: '20'
+  API_BASE_URL: 'http://localhost:8000'
+  FRONTEND_URL: 'http://localhost:3000'
+  TEST_AUTH_TOKEN: ${{ secrets.TEST_AUTH_TOKEN }}
+  TEST_USER_EMAIL: ${{ secrets.TEST_USER_EMAIL }}
+  TEST_USER_PASSWORD: ${{ secrets.TEST_USER_PASSWORD }}
+
+jobs:
+  # -----------------------------------------------------------------------
+  # JOB 1: Backend API Tests (pytest + httpx)
+  # -----------------------------------------------------------------------
+  backend-api-tests:
+    name: Backend API Tests — pytest + httpx
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      # Local FastAPI backend for integration testing
+      fastapi-backend:
+        image: python:3.11-slim
+        ports:
+          - 8000:8000
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install backend dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r backend/requirements.txt
+          pip install pytest pytest-asyncio httpx pytest-cov
+
+      - name: Start FastAPI backend (background)
+        working-directory: backend
+        run: |
+          uvicorn app.main:app --host 0.0.0.0 --port 8000 &
+          echo "Waiting for backend to be ready..."
+          for i in {1..30}; do
+            curl -sf http://localhost:8000/health && break || sleep 2
+          done
+        env:
+          AZURE_BLOB_CONNECTION_STRING: ${{ secrets.AZURE_BLOB_CONNECTION_STRING_TEST }}
+          AZURE_COSMOS_CONNECTION_STRING: ${{ secrets.AZURE_COSMOS_CONNECTION_STRING_TEST }}
+          JWT_SECRET_KEY: ${{ secrets.JWT_SECRET_KEY_TEST }}
+
+      - name: Run TS-003 Backend API tests
+        run: |
+          pytest tests/test_document_upload_format_validation.py \
+            -v \
+            --tb=short \
+            --asyncio-mode=auto \
+            --cov=backend/app \
+            --cov-report=xml:coverage-backend-ts003.xml \
+            --junitxml=test-results-backend-ts003.xml
+
+      - name: Upload backend test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-test-results-ts003
+          path: |
+            test-results-backend-ts003.xml
+            coverage-backend-ts003.xml
+
+      - name: Publish backend test report
+        if: always()
+        uses: dorny/test-reporter@v1
+        with:
+          name: TS-003 Backend API Tests
+          path: test-results-backend-ts003.xml
+          reporter: java-junit
+
+  # -----------------------------------------------------------------------
+  # JOB 2: E2E Tests (Playwright — headless Chromium)
+  # -----------------------------------------------------------------------
+  e2e-tests:
+    name: E2E Tests — Playwright Headless
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: backend-api-tests
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Set up Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Python E2E test dependencies
+        run: |
+          pip install --upgrade pip
+          pip install pytest playwright pytest-playwright
+
+      - name: Install Playwright browsers (headless Chromium only)
+        run: |
+          playwright install chromium
+          playwright install-deps chromium
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+        env:
+          NEXT_PUBLIC_API_BASE_URL: ${{ env.API_BASE_URL }}
+
+      - name: Start frontend (background)
+        working-directory: frontend
+        run: |
+          npm run start &
+          echo "Waiting for frontend to be ready..."
+          for i in {1..30}; do
+            curl -sf http://localhost:3000 && break || sleep 2
+          done
+
+      - name: Start FastAPI backend (background)
+        working-directory: backend
+        run: |
+          pip install -r requirements.txt
+          uvicorn app.main:app --host 0.0.0.0 --port 8000 &
+          for i in {1..30}; do
+            curl -sf http://localhost:8000/health && break || sleep 2
+          done
+        env:
+          AZURE_BLOB_CONNECTION_STRING: ${{ secrets.AZURE_BLOB_CONNECTION_STRING_TEST }}
+          AZURE_COSMOS_CONNECTION_STRING: ${{ secrets.AZURE_COSMOS_CONNECTION_STRING_TEST }}
+          JWT_SECRET_KEY: ${{ secrets.JWT_SECRET_KEY_TEST }}
+
+      - name: Run TS-003 Playwright E2E tests
+        run: |
+          pytest tests/e2e/test_document_upload_e2e.py \
+            -v \
+            --tb=short \
+            --junitxml=test-results-e2e-ts003.xml
+        env:
+          FRONTEND_URL: ${{ env.FRONTEND_URL }}
+          TEST_USER_EMAIL: ${{ env.TEST_USER_EMAIL }}
+          TEST_USER_PASSWORD: ${{ env.TEST_USER_PASSWORD }}
+
+      - name: Upload Playwright traces on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces-ts003
+          path: playwright-report/
+
+      - name: Upload E2E test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-test-results-ts003
+          path: test-results-e2e-ts003.xml
+
+      - name: Publish E2E test report
+        if: always()
+        uses: dorny/test-reporter@v1
+        with:
+          name: TS-003 E2E Playwright Tests
+          path: test-results-e2e-ts003.xml
+          reporter: java-junit

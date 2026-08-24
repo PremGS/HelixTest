@@ -1,0 +1,143 @@
+name: TS-001 Authentication & Authorization Tests
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+      - 'feature/**'
+    paths:
+      - 'shared/auth/**'
+      - 'tests/auth/**'
+      - '.github/workflows/ts-001-auth-tests.yml'
+  pull_request:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'shared/auth/**'
+      - 'tests/auth/**'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: false
+        default: 'ci'
+        type: choice
+        options:
+          - ci
+          - staging
+
+jobs:
+  auth-tests:
+    name: Run TS-001 Auth Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.11']
+
+    services:
+      # Local FastAPI mock server for CI — replace with actual service or testcontainer
+      # TBD: add Docker Compose testcontainer for auth middleware service
+      mock-api:
+        image: python:3.11-slim
+        options: >-
+          --health-cmd "curl -f http://localhost:8000/health || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+          cache-dependency-path: 'tests/auth/requirements-test.txt'
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r tests/auth/requirements-test.txt
+
+      - name: Install application dependencies
+        run: |
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          if [ -f shared/auth/requirements.txt ]; then pip install -r shared/auth/requirements.txt; fi
+
+      - name: Start auth middleware test server
+        run: |
+          # Start the FastAPI auth middleware server in background for integration tests
+          # TBD: replace with actual service startup command
+          python -m uvicorn shared.auth.test_server:app --host 0.0.0.0 --port 8000 &
+          echo "Waiting for server to be ready..."
+          for i in $(seq 1 30); do
+            if curl -s http://localhost:8000/health > /dev/null 2>&1; then
+              echo "Server is ready"
+              break
+            fi
+            sleep 1
+          done
+        env:
+          ENVIRONMENT: ci
+          AZURE_AD_B2C_TENANT: ${{ secrets.AZURE_AD_B2C_TENANT || 'test-tenant' }}
+          AZURE_AD_B2C_CLIENT_ID: ${{ secrets.AZURE_AD_B2C_CLIENT_ID || 'test-client-id' }}
+          TEST_JWT_SECRET: ${{ secrets.TEST_JWT_SECRET || 'test-secret-key-for-ci-only' }}
+
+      - name: Run TS-001 Authentication & Authorization Tests
+        run: |
+          pytest tests/auth/test_authentication_authorization.py \
+            -v \
+            --tb=short \
+            --strict-markers \
+            --asyncio-mode=auto \
+            --cov=shared/auth \
+            --cov-report=xml:coverage-auth.xml \
+            --cov-report=term-missing \
+            --junit-xml=test-results-ts-001.xml \
+            -p no:warnings
+        env:
+          API_BASE_URL: http://localhost:8000
+          AZURE_AD_B2C_TENANT: ${{ secrets.AZURE_AD_B2C_TENANT || 'test-tenant' }}
+          AZURE_AD_B2C_CLIENT_ID: ${{ secrets.AZURE_AD_B2C_CLIENT_ID || 'test-client-id' }}
+          AZURE_AD_B2C_ISSUER: ${{ secrets.AZURE_AD_B2C_ISSUER || 'https://test-tenant.b2clogin.com/test-tenant.onmicrosoft.com/v2.0/' }}
+          JWKS_URI: ${{ secrets.JWKS_URI || 'https://test-tenant.b2clogin.com/test-tenant.onmicrosoft.com/discovery/v2.0/keys' }}
+          TEST_JWT_SECRET: ${{ secrets.TEST_JWT_SECRET || 'test-secret-key-for-ci-only' }}
+          TEST_USER_ID: test-user-oid-12345
+          TEST_USER_EMAIL: testuser@example.com
+          CATS_SSO_ISSUER: ${{ secrets.CATS_SSO_ISSUER || 'https://cats-sso.example.com/' }}
+          SESSION_TIMEOUT_SECONDS: '3600'
+          PYTHONPATH: ${{ github.workspace }}
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ts-001-test-results
+          path: |
+            test-results-ts-001.xml
+            coverage-auth.xml
+          retention-days: 30
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        if: always()
+        with:
+          file: coverage-auth.xml
+          flags: ts-001-auth
+          name: TS-001-Authentication-Authorization
+          fail_ci_if_error: false
+
+      - name: Publish test results
+        uses: EnricoMi/publish-unit-test-result-action@v2
+        if: always()
+        with:
+          files: test-results-ts-001.xml
+          check_name: 'TS-001 Auth Test Results'
+          comment_title: 'TS-001 Authentication & Authorization'
