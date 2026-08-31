@@ -8,6 +8,8 @@ Record architectural decisions, trade-offs, and notable implementation choices h
 
 | Date | Decision | Rationale |
 | ---- | -------- | --------- |
+| 2026-08-31 | Built ProcessingStatusPanel with StageIndicator and ErrorBanner sub-components using CSS Modules; useProcessingStatus hook hydrates from REST on mount and derives blocked states from first failed stage | Keeps all logic co-located, avoids external state libraries, and ensures browser-refresh persistence (AC3) via initial REST fetch before any SignalR events |
+<!-- ticket:SUBTASK-9 -->
 
 ## UI Screen Inventory
 
