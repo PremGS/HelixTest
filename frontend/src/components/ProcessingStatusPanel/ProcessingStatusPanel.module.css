@@ -1,0 +1,198 @@
+/* ProcessingStatusPanel styles */
+
+.panel {
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 24px;
+  max-width: 560px;
+}
+
+.panelTitle {
+  font-size: 1.125rem;
+  font-weight: 600;
+  color: #111827;
+  margin: 0 0 20px 0;
+}
+
+.loadingText,
+.fetchError {
+  color: #6b7280;
+  font-size: 0.875rem;
+}
+
+.retryButton {
+  background: none;
+  border: none;
+  color: #3b82f6;
+  cursor: pointer;
+  font-size: 0.875rem;
+  padding: 0;
+  text-decoration: underline;
+}
+
+/* Stage list */
+
+.stageList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.stage {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-radius: 6px;
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+}
+
+/* Status variants */
+
+.stage--pending {
+  opacity: 0.6;
+}
+
+.stage--active {
+  border-color: #93c5fd;
+  background: #eff6ff;
+}
+
+.stage--complete {
+  border-color: #86efac;
+  background: #f0fdf4;
+}
+
+.stage--failed {
+  border-color: #fca5a5;
+  background: #fef2f2;
+}
+
+.stage--blocked {
+  opacity: 0.5;
+  background: #f3f4f6;
+}
+
+/* Icons */
+
+.stageIconWrapper {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border-radius: 50%;
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.iconPending {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: #d1d5db;
+  color: #6b7280;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.iconComplete {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: #22c55e;
+  color: #ffffff;
+  font-size: 1rem;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.6; transform: scale(0.85); }
+}
+
+.iconActive {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #3b82f6;
+  animation: pulse 1.2s ease-in-out infinite;
+  margin: auto;
+}
+
+.iconFailed {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: #ef4444;
+  color: #ffffff;
+  font-size: 1rem;
+}
+
+.iconBlocked {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  color: #9ca3af;
+  font-size: 1rem;
+}
+
+.stageLabel {
+  font-size: 0.9375rem;
+  font-weight: 500;
+  color: #374151;
+}
+
+/* Error banner */
+
+.errorBanner {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 20px;
+  padding: 14px;
+  background: #fef2f2;
+  border: 1px solid #fca5a5;
+  border-radius: 6px;
+}
+
+.errorBannerIcon {
+  color: #ef4444;
+  font-size: 1.25rem;
+  flex-shrink: 0;
+}
+
+.errorBannerContent {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.errorBannerMessage {
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: #991b1b;
+}
+
+.errorBannerCode {
+  font-size: 0.75rem;
+  color: #b91c1c;
+  font-family: monospace;
+}
