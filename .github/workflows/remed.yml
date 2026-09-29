@@ -1,0 +1,197 @@
+# Checkmarx SAST remediation via Claude Code + checkmarx-remediation skill.
+#
+# Control-plane shape (deterministic steps wrap one agent step):
+#   scan -> triage (caps scope) -> AGENT edits files -> re-scan -> verify (delta gate + diff guard)
+#   -> open PR for human code-owner review. The agent cannot push, open PRs, or reach the network.
+#
+# Items marked TODO(lilly) need a value or confirmation specific to your environment.
+# Pin every third-party action to a full commit SHA before enabling (tags shown for readability).
+
+name: checkmarx-remediation
+
+on:
+  workflow_dispatch:
+    inputs:
+      min_severity:
+        description: "Lowest severity to remediate"
+        default: "high"
+        type: choice
+        options: [critical, high, medium]
+      max_findings:
+        description: "Max actionable findings per run"
+        default: "5"
+      rule_filter:
+        description: "Optional regex on rule name, e.g. 'SQL|Path_Traversal'"
+        default: ""
+  schedule:
+    - cron: "0 3 * * 1-5"   # weekdays 03:00 UTC
+
+concurrency:
+  group: checkmarx-remediation-${{ github.repository }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write         # push remediation branch (used only by the final deterministic step)
+  pull-requests: write    # open PR
+  id-token: write         # OIDC for AWS (Bedrock) and JFrog
+
+env:
+  SKILL_DIR: .claude/skills/checkmarx-remediation
+  MIN_SEVERITY: ${{ inputs.min_severity || 'high' }}
+  MAX_FINDINGS: ${{ inputs.max_findings || '5' }}
+  RULE_FILTER: ${{ inputs.rule_filter || '' }}
+
+jobs:
+  remediate:
+    runs-on: ubuntu-latest   # TODO(lilly): use your approved runner group/label
+    timeout-minutes: 60
+    steps:
+      - name: Checkout (no persisted credentials; the agent step must not be able to push)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prepare work dir
+        run: |
+          mkdir -p cx-work
+          echo "cx-work/" >> .git/info/exclude
+          echo "BASE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      # TODO(lilly): Artifactory. Claude Code itself is an npm package; the action installs it
+      # at runtime. Public npm is prohibited, so either (a) point npm/bun at your Artifactory
+      # npm remote here via OIDC, or (b) use a runner image with Claude Code pre-installed
+      # from Artifactory and point the action at that executable (check the action's current
+      # inputs for this option). Confirm which is sanctioned before first run.
+      - name: Configure JFrog CLI (Artifactory)
+        uses: jfrog/setup-jfrog-cli@v4
+        env:
+          JF_URL: https://elilillyco.jfrog.io
+        with:
+          oidc-provider-name: ${{ vars.JFROG_OIDC_PROVIDER }}   # TODO(lilly)
+      - name: Route npm through Artifactory
+        run: |
+          jf npmc --global --repo-resolve "${{ vars.ARTIFACTORY_NPM_REMOTE }}"   # TODO(lilly)
+
+      # ---------- 1. Baseline scan ----------
+      # TODO(lilly): confirm CLI flag names against your Checkmarx One CLI version. If your
+      # pipeline already produces a SARIF for this commit, download that artifact instead.
+      - name: Checkmarx scan (baseline)
+        uses: checkmarx/ast-github-action@main   # TODO: pin SHA
+        with:
+          base_uri: ${{ vars.CX_BASE_URI }}
+          cx_tenant: ${{ vars.CX_TENANT }}
+          cx_client_id: ${{ secrets.CX_CLIENT_ID }}
+          cx_client_secret: ${{ secrets.CX_CLIENT_SECRET }}
+          project_name: ${{ github.repository }}
+          additional_params: >-
+            --scan-types sast
+            --report-format sarif
+            --output-path cx-work
+            --output-name results
+
+      # ---------- 2. Deterministic triage (scope is decided here, not by the agent) ----------
+      - name: Triage
+        id: triage
+        run: |
+          set +e
+          python3 "$SKILL_DIR/scripts/triage.py" \
+            --sarif cx-work/results.sarif --out cx-work/queue.json \
+            --min-severity "$MIN_SEVERITY" --max-actionable "$MAX_FINDINGS" \
+            ${RULE_FILTER:+--include-rule-regex "$RULE_FILTER"}
+          rc=$?
+          if [ $rc -eq 3 ]; then echo "work=false" >> "$GITHUB_OUTPUT"; exit 0; fi
+          [ $rc -eq 0 ] && echo "work=true" >> "$GITHUB_OUTPUT"
+          exit $rc
+
+      # ---------- 3. Agent ----------
+      # TODO(lilly): inference path. Shown with Bedrock via OIDC. If this must route through
+      # Cortex instead, confirm Cortex offers a non-interactive service credential for CI
+      # before adopting — that path is not verified here.
+      - name: Configure AWS credentials (Bedrock)
+        if: steps.triage.outputs.work == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.BEDROCK_ROLE_ARN }}   # TODO(lilly)
+          aws-region: us-east-1
+
+      - name: Remediate with Claude Code
+        if: steps.triage.outputs.work == 'true'
+        uses: anthropics/claude-code-action@v1   # TODO: pin SHA
+        with:
+          use_bedrock: "true"
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: |
+            Use the checkmarx-remediation skill.
+            The triaged work queue is at cx-work/queue.json and the raw scan at cx-work/results.sarif.
+            Fix the actionable findings, write advisories for the rest, and write
+            cx-work/remediation-report.json. Do not commit, push, or open a pull request.
+          claude_args: >-
+            --model ${{ vars.BEDROCK_MODEL_ID }}
+            --max-turns 80
+            --allowedTools "Read,Edit,MultiEdit,Write,Glob,Grep,Bash(git diff:*),Bash(git status:*),Bash(python3 .claude/skills/checkmarx-remediation/scripts/triage.py:*)"
+            --disallowedTools "WebFetch,WebSearch"
+
+      # ---------- 4. Independent re-scan of the modified tree ----------
+      - name: Stage new files for diffing
+        if: steps.triage.outputs.work == 'true'
+        run: git add -N .
+
+      - name: Checkmarx scan (after)
+        if: steps.triage.outputs.work == 'true'
+        uses: checkmarx/ast-github-action@main   # TODO: pin SHA
+        with:
+          base_uri: ${{ vars.CX_BASE_URI }}
+          cx_tenant: ${{ vars.CX_TENANT }}
+          cx_client_id: ${{ secrets.CX_CLIENT_ID }}
+          cx_client_secret: ${{ secrets.CX_CLIENT_SECRET }}
+          project_name: ${{ github.repository }}
+          branch: cx-remediation-verify
+          additional_params: >-
+            --scan-types sast
+            --report-format sarif
+            --output-path cx-work
+            --output-name results-after
+
+      # ---------- 5. Your existing build/test ----------
+      - name: Build and test
+        if: steps.triage.outputs.work == 'true'
+        run: |
+          echo "TODO(lilly): run the repo's normal build + unit tests here (dependencies via Artifactory)."
+
+      # ---------- 6. Verification gate ----------
+      - name: Verify (delta gate + diff guard + report)
+        id: verify
+        if: steps.triage.outputs.work == 'true'
+        run: |
+          python3 "$SKILL_DIR/scripts/verify.py" \
+            --before cx-work/results.sarif --after cx-work/results-after.sarif \
+            --queue cx-work/queue.json --report cx-work/remediation-report.json \
+            --base-ref "$BASE_SHA" --min-severity medium
+
+      # ---------- 7. Open PR (only reached if verification passed) ----------
+      - name: Open pull request for human review
+        if: steps.triage.outputs.work == 'true' && steps.verify.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH="security/cx-remediation-${GITHUB_RUN_ID}"
+          git config user.name  "cx-remediation-bot"
+          git config user.email "cx-remediation-bot@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add -A
+          git commit -m "fix(security): automated Checkmarx remediation (run ${GITHUB_RUN_ID})" \
+                     -m "Model-synthesized; verified by re-scan; requires code-owner review."
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$BRANCH"
+          gh pr create --base "${GITHUB_REF_NAME}" --head "$BRANCH" \
+            --title "Security: automated Checkmarx remediation (run ${GITHUB_RUN_ID})" \
+            --body-file cx-work/pr-body.md \
+            --label security-remediation --label ai-generated
+
+      - name: Upload run evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cx-remediation-${{ github.run_id }}
+          path: cx-work/
+          retention-days: 90
